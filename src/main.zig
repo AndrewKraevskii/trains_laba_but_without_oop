@@ -4,6 +4,7 @@ const rgui = @import("raygui");
 
 const Vec = rl.Vector2;
 const station_width = 10;
+
 // All unites are in [SI](https://en.wikipedia.org/wiki/International_System_of_Units).
 
 const Segment = union(enum) {
@@ -50,7 +51,87 @@ const Train = struct {
     speed: f32 = 0.0,
     max_force: f32,
     mass: f32,
+
+    pub fn move(
+        train: Train,
+        route: Route,
+        delta_t: f32,
+    ) MoveTrainResult!Train {
+        var mutable_train = train;
+        const current_segment = getTrainSegment(mutable_train, route) orelse {
+            return if (mutable_train.speed > route.route_end_speed_limit)
+                error.ExcessiveSpeedAtRouteEnd
+            else
+                error.FinishedRouteSuccesfully;
+        };
+        if (train.speed <= 0 and current_segment.segment == .common) {
+            return error.ZeroSpeedOnCommonRails;
+        }
+
+        var train_delta_pos: f32 = 0;
+        switch (current_segment.segment) {
+            .common => {
+                train_delta_pos += delta_t * mutable_train.speed;
+            },
+            .force => |force| {
+                if (mutable_train.max_force < force.applied_force) {
+                    return error.TrainBrokenFromToMuchForce;
+                }
+                const acceleration = force.applied_force / mutable_train.mass;
+
+                train_delta_pos += delta_t * mutable_train.speed / 2;
+                mutable_train.speed += acceleration * delta_t;
+                train_delta_pos += delta_t * mutable_train.speed / 2;
+            },
+            .station => {
+                // empty
+            },
+        }
+        mutable_train.position += train_delta_pos;
+
+        if (mutable_train.speed < 0) {
+            return error.SpeedIsNegative;
+        }
+
+        if ((train_delta_pos + current_segment.position) > current_segment.segment.length()) {
+            // train moved to next segment
+            if (current_segment.index + 1 == route.segments.items.len) {
+                // route finished
+                if (mutable_train.speed > route.route_end_speed_limit)
+                    return error.ExcessiveSpeedAtRouteEnd;
+
+                return error.FinishedRouteSuccesfully;
+            } else {
+                const next_segment = route.segments.items[current_segment.index + 1];
+                if (next_segment == .station and train.speed > next_segment.station.max_arriving_speed) {
+                    return error.ExceesiveSpeedAtTheStation;
+                }
+            }
+        }
+
+        return mutable_train;
+    }
 };
+
+pub fn getTrainSegment(train: Train, route: Route) ?struct {
+    segment: Segment,
+    index: usize,
+    position: f32,
+} {
+    const segments = route.segments.items;
+    var current_offset_x: f32 = 0;
+    std.debug.assert(current_offset_x >= 0);
+    for (segments, 0..) |segment, index| {
+        const next_offset_x = current_offset_x + segment.length();
+        defer current_offset_x = next_offset_x;
+        if (current_offset_x <= train.position and train.position < next_offset_x) return .{
+            .segment = segment,
+            .index = index,
+            .position = train.position - current_offset_x,
+        };
+    }
+    return null;
+}
 
 pub fn drawRoute(route: Route, rect: rl.Rectangle, highlighting: ?struct { index: usize, type: enum { hovered, selected } }) void {
     const highlighting_color: ?rl.Color = if (highlighting) |h| if (h.type == .hovered) .white else .yellow else null;
@@ -127,26 +208,6 @@ pub fn drawRoute(route: Route, rect: rl.Rectangle, highlighting: ?struct { index
     }
 }
 
-pub fn getTrainSegment(train: Train, route: Route) ?struct {
-    segment: Segment,
-    index: usize,
-    position: f32,
-} {
-    const segments = route.segments.items;
-    var current_offset_x: f32 = 0;
-    std.debug.assert(current_offset_x >= 0);
-    for (segments, 0..) |segment, index| {
-        const next_offset_x = current_offset_x + segment.length();
-        defer current_offset_x = next_offset_x;
-        if (current_offset_x <= train.position and train.position < next_offset_x) return .{
-            .segment = segment,
-            .index = index,
-            .position = train.position - current_offset_x,
-        };
-    }
-    return null;
-}
-
 pub fn getRouteSegmentIndexByPosition(
     route: Route,
     fraction_of_route: f32,
@@ -176,66 +237,6 @@ const RouteCompiltionErrors = error{
 };
 
 const MoveTrainResult = error{FinishedRouteSuccesfully} || RouteCompiltionErrors;
-
-pub fn moveTrain(
-    train: Train,
-    route: Route,
-    delta_t: f32,
-) MoveTrainResult!Train {
-    var mutable_train = train;
-    const current_segment = getTrainSegment(mutable_train, route) orelse {
-        return if (mutable_train.speed > route.route_end_speed_limit)
-            error.ExcessiveSpeedAtRouteEnd
-        else
-            error.FinishedRouteSuccesfully;
-    };
-    if (train.speed <= 0 and current_segment.segment == .common) {
-        return error.ZeroSpeedOnCommonRails;
-    }
-
-    var train_delta_pos: f32 = 0;
-    switch (current_segment.segment) {
-        .common => {
-            train_delta_pos += delta_t * mutable_train.speed;
-        },
-        .force => |force| {
-            if (mutable_train.max_force < force.applied_force) {
-                return error.TrainBrokenFromToMuchForce;
-            }
-            const acceleration = force.applied_force / mutable_train.mass;
-
-            train_delta_pos += delta_t * mutable_train.speed / 2;
-            mutable_train.speed += acceleration * delta_t;
-            train_delta_pos += delta_t * mutable_train.speed / 2;
-        },
-        .station => {
-            // empty
-        },
-    }
-    mutable_train.position += train_delta_pos;
-
-    if (mutable_train.speed < 0) {
-        return error.SpeedIsNegative;
-    }
-
-    if ((train_delta_pos + current_segment.position) > current_segment.segment.length()) {
-        // train moved to next segment
-        if (current_segment.index + 1 == route.segments.items.len) {
-            // route finished
-            if (mutable_train.speed > route.route_end_speed_limit)
-                return error.ExcessiveSpeedAtRouteEnd;
-
-            return error.FinishedRouteSuccesfully;
-        } else {
-            const next_segment = route.segments.items[current_segment.index + 1];
-            if (next_segment == .station and train.speed > next_segment.station.max_arriving_speed) {
-                return error.ExceesiveSpeedAtTheStation;
-            }
-        }
-    }
-
-    return mutable_train;
-}
 
 pub fn generateRandomRoute(alloc: std.mem.Allocator, random: std.Random, number_of_segments: usize) !Route {
     var route = Route{ .segments = .init(alloc), .route_end_speed_limit = random.float(f32) * 10 + 30 };
@@ -269,7 +270,7 @@ pub fn generateRandomRoute(alloc: std.mem.Allocator, random: std.Random, number_
     return route;
 }
 
-const ErrorMessages = struct {
+const MessageDrawer = struct {
     position: Vec,
     messages: std.BoundedArray(Message, 50),
     font_size: i32,
@@ -278,10 +279,10 @@ const ErrorMessages = struct {
         string: [:0]const u8,
         color: rl.Color = .red,
         current_position: f32 = 0,
-        time_to_leave: f32 = 10,
+        time_to_live: f32 = 10,
     };
 
-    pub fn addMessage(self: *ErrorMessages, message: Message) void {
+    pub fn addMessage(self: *MessageDrawer, message: Message) void {
         if (self.messages.capacity() == self.messages.len) {
             _ = self.messages.orderedRemove(0);
         }
@@ -293,8 +294,8 @@ const ErrorMessages = struct {
         var index: usize = 0;
         while (index < self.messages.len) {
             var message = self.messages.get(index);
-            message.time_to_leave -= delta_time;
-            if (message.time_to_leave <= 0) {
+            message.time_to_live -= delta_time;
+            if (message.time_to_live <= 0) {
                 _ = self.messages.orderedRemove(index);
                 continue;
             }
@@ -310,12 +311,13 @@ const ErrorMessages = struct {
 
     pub fn draw(self: @This()) void {
         for (self.messages.slice()) |message| {
+            const fade_time = 0.4;
             rl.drawText(
                 message.string,
                 @intFromFloat(self.position.x),
                 @intFromFloat(self.position.y + message.current_position),
                 self.font_size,
-                message.color,
+                message.color.fade(@min(message.time_to_live, fade_time) / fade_time),
             );
         }
     }
@@ -325,7 +327,68 @@ fn expDecay(a: anytype, b: @TypeOf(a), lambda: @TypeOf(a), dt: @TypeOf(a)) @Type
     return std.math.lerp(a, b, 1 - @exp(-lambda * dt));
 }
 
-pub fn mainUi() !void {
+pub fn generateNiceRoute(
+    alloc: std.mem.Allocator,
+    train: Train,
+    number_of_nodes: usize,
+    starting_seed: u64,
+) !struct {
+    route: Route,
+    seed: u64,
+    /// time it takes for given train to pass route
+    time: f32,
+} {
+    var random_impl = std.Random.DefaultPrng.init(0);
+    var random = random_impl.random();
+
+    var route = try generateRandomRoute(alloc, random, number_of_nodes);
+
+    var seed: u64 = starting_seed;
+    while (true) {
+        const res = tryRoute(train, route, .{}) catch {
+            seed += 1;
+            random_impl = std.Random.DefaultPrng.init(seed);
+            random = random_impl.random();
+
+            route.segments.deinit();
+            route = try generateRandomRoute(alloc, random, 10);
+            continue;
+        };
+        return .{ .route = route, .seed = seed, .time = res.time_to_finish_seconds };
+    }
+}
+
+const TryRouteError = RouteCompiltionErrors || error{Timeout};
+
+pub fn tryRoute(
+    starting_train: Train,
+    route: Route,
+    config: struct {
+        max_time_seconds: f32 = 10 * 60 * 60, // 10h
+        delta_t: f32 = 1.0 / 60.0,
+    },
+) TryRouteError!struct { time_to_finish_seconds: f32 } {
+    var train = starting_train;
+
+    var time_passed: f32 = 0;
+    while (true) {
+        time_passed += config.delta_t;
+        if (time_passed > config.max_time_seconds) return error.Timeout;
+        if (train.move(route, config.delta_t)) |new_train| {
+            train = new_train;
+        } else |err| {
+            switch (err) {
+                error.FinishedRouteSuccesfully => {
+                    return .{ .time_to_finish_seconds = time_passed };
+                },
+                else => |other| {
+                    return other;
+                },
+            }
+        }
+    }
+}
+pub fn main() !void {
     var buf: [10000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const alloc = fba.allocator();
@@ -342,7 +405,7 @@ pub fn mainUi() !void {
     defer route.segments.deinit();
     var seed = result.seed + 1;
 
-    var messages = ErrorMessages{
+    var messages = MessageDrawer{
         .position = .zero(),
         .messages = .{},
         .font_size = 30,
@@ -368,7 +431,7 @@ pub fn mainUi() !void {
         if (!is_paused) {
             ui_time_step += rl.getFrameTime() * @exp(time_scale);
             while (ui_time_step > time_step) : (ui_time_step -= time_step) {
-                if (moveTrain(train, route, 1.0 / 60.0)) |new_train| {
+                if (train.move(route, 1.0 / 60.0)) |new_train| {
                     train = new_train;
                 } else |err| {
                     const color: rl.Color = switch (err) {
@@ -548,83 +611,4 @@ pub fn mainUi() !void {
     }
 
     rl.closeWindow();
-}
-
-pub fn generateNiceRoute(
-    alloc: std.mem.Allocator,
-    train: Train,
-    number_of_nodes: usize,
-    starting_seed: u64,
-) !struct {
-    route: Route,
-    seed: u64,
-    /// time it takes for given train to pass route
-    time: f32,
-} {
-    var random_impl = std.Random.DefaultPrng.init(0);
-    var random = random_impl.random();
-
-    var route = try generateRandomRoute(alloc, random, number_of_nodes);
-
-    var seed: u64 = starting_seed;
-    while (true) {
-        const res = tryRoute(train, route, .{}) catch {
-            seed += 1;
-            random_impl = std.Random.DefaultPrng.init(seed);
-            random = random_impl.random();
-
-            route.segments.deinit();
-            route = try generateRandomRoute(alloc, random, 10);
-            continue;
-        };
-        return .{ .route = route, .seed = seed, .time = res.time_to_finish_seconds };
-    }
-}
-
-const TryRouteError = RouteCompiltionErrors || error{Timeout};
-
-pub fn tryRoute(
-    starting_train: Train,
-    route: Route,
-    config: struct {
-        max_time_seconds: f32 = 10 * 60 * 60, // 10h
-        delta_t: f32 = 1.0 / 60.0,
-    },
-) TryRouteError!struct { time_to_finish_seconds: f32 } {
-    var train = starting_train;
-
-    var time_passed: f32 = 0;
-    while (true) {
-        time_passed += config.delta_t;
-        if (time_passed > config.max_time_seconds) return error.Timeout;
-        if (moveTrain(train, route, config.delta_t)) |new_train| {
-            train = new_train;
-        } else |err| {
-            switch (err) {
-                error.FinishedRouteSuccesfully => {
-                    return .{ .time_to_finish_seconds = time_passed };
-                },
-                else => |other| {
-                    return other;
-                },
-            }
-        }
-    }
-}
-
-pub fn mainHeadless() !void {
-    var seed: u64 = 0;
-    for (0..100) |_| {
-        const result = try generateNiceRoute(
-            .{ .mass = 200 * 1000, .max_force = 1000 * 1000 },
-            seed,
-        );
-        // std.log.err("found succesfull route with seed: {d} in {}", .{ seed, std.fmt.fmtDuration(@intFromFloat(res.time_to_finish_seconds * std.time.ns_per_s)) });
-        std.debug.print("found succesfull route with seed: {d} in {}\n", .{ result.seed, std.fmt.fmtDuration(@intFromFloat(result.time * std.time.ns_per_s)) });
-        seed = result.seed + 1;
-    }
-}
-
-pub fn main() !void {
-    try mainUi();
 }
