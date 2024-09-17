@@ -12,16 +12,16 @@ const Segment = union(enum) {
     station: Station,
 
     const Common = struct {
-        length: f32,
+        length: f32 = 1_000,
     };
 
     const Force = struct {
-        length: f32,
-        applied_force: f32,
+        length: f32 = 1_000,
+        applied_force: f32 = 100_000,
     };
 
     const Station = struct {
-        max_arriving_speed: f32,
+        max_arriving_speed: f32 = 20,
     };
 
     pub fn length(self: @This()) f32 {
@@ -103,6 +103,11 @@ pub fn drawRoute(route: Route, rect: rl.Rectangle, highlighting: ?struct { index
 
     {
         var current_offset_x: f32 = 0;
+        rl.drawCircleLinesV(
+            middle_left.add(.{ .x = 0, .y = 0 }),
+            padding,
+            .white,
+        );
         for (segments[0 .. segments.len - 1], 0..) |segment, index| {
             const next_offset_x = current_offset_x + segment.length();
             defer current_offset_x = next_offset_x;
@@ -114,6 +119,11 @@ pub fn drawRoute(route: Route, rect: rl.Rectangle, highlighting: ?struct { index
                 );
             }
         }
+        rl.drawCircleLinesV(
+            middle_left.add(.{ .x = scale * length, .y = 0 }),
+            padding,
+            .white,
+        );
     }
 }
 
@@ -326,7 +336,8 @@ pub fn mainUi() !void {
     const default_train = Train{ .mass = 200 * 1000, .max_force = 1000 * 1000 };
 
     var train = default_train;
-    const result = try generateNiceRoute(alloc, train, 0);
+    const number_of_nodes: i32 = 10;
+    const result = try generateNiceRoute(alloc, train, number_of_nodes, 0);
     var route = result.route;
     defer route.segments.deinit();
     var seed = result.seed + 1;
@@ -343,7 +354,7 @@ pub fn mainUi() !void {
     var is_paused: bool = false;
     var maybe_selected_index: ?usize = null;
 
-    var time_scale: f32 = 1;
+    var time_scale: f32 = 3;
     const time_step = 1.0 / 60.0;
     var ui_time_step: f32 = 0;
     const widget_width = 100;
@@ -371,7 +382,7 @@ pub fn mainUi() !void {
                     maybe_selected_index = null;
                     route.segments.deinit();
                     train = default_train;
-                    const res = try generateNiceRoute(alloc, train, seed);
+                    const res = try generateNiceRoute(alloc, train, number_of_nodes, seed);
                     seed = res.seed + 1;
                     route = res.route;
                 }
@@ -401,6 +412,40 @@ pub fn mainUi() !void {
                 .type = if (maybe_selected_index != null) .selected else .hovered,
             } else null);
 
+            var rect = rl.Rectangle{ .x = @floatFromInt(rl.getScreenWidth() - widget_width - 100), .y = 10, .height = 20, .width = widget_width };
+
+            if (rgui.guiButton(rect, "RELOAD") == 1) {
+                messages.addMessage(.{
+                    .string = "Reloaded",
+                    .color = .yellow,
+                });
+                maybe_selected_index = null;
+                route.segments.deinit();
+                train = default_train;
+                const res = try generateNiceRoute(alloc, train, number_of_nodes, seed);
+                seed = res.seed + 1;
+                route = res.route;
+            }
+            rect.y += rect.height * 2;
+
+            if (rgui.guiButton(rect, if (is_paused) "CONTINUE" else "PAUSE") == 1) {
+                is_paused = !is_paused;
+                messages.addMessage(.{
+                    .string = if (is_paused) "Paused" else "Unpaused",
+                    .color = .yellow,
+                });
+            }
+            rect.y += rect.height * 2;
+
+            _ = rgui.guiSlider(
+                rect,
+                "slow " ++ std.fmt.comptimePrint("{}", .{comptime std.fmt.fmtDuration(@intFromFloat(@exp(-2.0) * std.time.ns_per_s))}),
+                "fast " ++ std.fmt.comptimePrint("{}", .{comptime std.fmt.fmtDuration(@intFromFloat(@exp(8.0) * std.time.ns_per_s))}),
+                &time_scale,
+                -2,
+                8,
+            );
+            rect.y += rect.height * 2;
             if (maybe_index) |selected_index| { // draw segment info
                 if (rl.isMouseButtonPressed(.mouse_button_left)) {
                     if (maybe_hovered_index) |hovered_index|
@@ -408,75 +453,81 @@ pub fn mainUi() !void {
                 }
                 const segment: *Segment = &route.segments.items[selected_index];
 
-                var rect = rl.Rectangle{ .x = @floatFromInt(rl.getScreenWidth() - widget_width - 100), .y = 50, .height = 10, .width = widget_width };
+                { // change node type
+                    var active: i32 = @intFromEnum(segment.*);
 
-                var active: i32 = @intFromEnum(segment.*);
+                    if (rgui.guiDropdownBox(
+                        rect,
+                        "common;force;station",
+                        &active,
+                        drop_down_edit_mode,
+                    ) == 1) {
+                        drop_down_edit_mode = !drop_down_edit_mode;
+                    }
+                    if (active != @intFromEnum(segment.*)) {
+                        switch (@as(std.meta.Tag(Segment), @enumFromInt(active))) {
+                            .common => {
+                                segment.* = if (segment.* == .force)
+                                    .{ .common = .{ .length = segment.force.length } }
+                                else
+                                    .{ .common = .{} };
+                            },
+                            .force => {
+                                segment.* = if (segment.* == .common)
+                                    .{ .force = .{ .length = segment.common.length } }
+                                else
+                                    .{ .force = .{} };
+                            },
+                            .station => {
+                                segment.* = .{ .station = .{} };
+                            },
+                        }
+                    }
 
-                if (rgui.guiDropdownBox(
-                    rect,
-                    "common;force;station",
-                    &active,
-                    drop_down_edit_mode,
-                ) == 1) {
-                    drop_down_edit_mode = !drop_down_edit_mode;
-                }
-                if (active != @intFromEnum(segment.*)) {
-                    switch (@as(std.meta.Tag(Segment), @enumFromInt(active))) {
+                    rect.y += rect.height * @as(f32, if (drop_down_edit_mode) 5 else 2);
+                    switch (segment.*) {
                         .common => {
-                            segment.* = .{ .common = .{ .length = 10_000 } };
+                            _ = rgui.guiSlider(
+                                rect,
+                                "length 0m",
+                                "10km",
+                                &segment.common.length,
+                                0,
+                                10000,
+                            );
+                            rect.y += rect.height;
                         },
                         .force => {
-                            segment.* = .{ .force = .{ .length = 10_000, .applied_force = 100000 } };
+                            _ = rgui.guiSlider(
+                                rect,
+                                "length 0m",
+                                "100km",
+                                &segment.force.length,
+                                0,
+                                100000,
+                            );
+                            rect.y += rect.height;
+                            _ = rgui.guiSlider(
+                                rect,
+                                "applied force 0N",
+                                "1MN",
+                                &segment.force.applied_force,
+                                -1000000,
+                                1000000,
+                            );
                         },
                         .station => {
-                            segment.* = .{ .station = .{ .max_arriving_speed = 20 } };
+                            _ = rgui.guiSlider(
+                                rect,
+                                "max speed 0m/s",
+                                "100m/s",
+                                &segment.station.max_arriving_speed,
+                                0,
+                                100,
+                            );
+                            rect.y += rect.height;
                         },
                     }
-                }
-
-                rect.y += rect.height * 5;
-                switch (segment.*) {
-                    .common => {
-                        _ = rgui.guiSlider(
-                            rect,
-                            "length 0m",
-                            "10km",
-                            &segment.common.length,
-                            0,
-                            10000,
-                        );
-                        rect.y += rect.height;
-                    },
-                    .force => {
-                        _ = rgui.guiSlider(
-                            rect,
-                            "length 0m",
-                            "100km",
-                            &segment.force.length,
-                            0,
-                            100000,
-                        );
-                        rect.y += rect.height;
-                        _ = rgui.guiSlider(
-                            rect,
-                            "applied force 0N",
-                            "1MN",
-                            &segment.force.applied_force,
-                            -1000000,
-                            1000000,
-                        );
-                    },
-                    .station => {
-                        _ = rgui.guiSlider(
-                            rect,
-                            "max speed 0m/s",
-                            "100m/s",
-                            &segment.station.max_arriving_speed,
-                            0,
-                            100,
-                        );
-                        rect.y += rect.height;
-                    },
                 }
             }
 
@@ -490,17 +541,6 @@ pub fn mainUi() !void {
                 }, .{ .x = 5, .y = 5 }, 0, .white);
             }
 
-            const top_right = rl.Rectangle{ .x = @floatFromInt(rl.getScreenWidth() - widget_width - 100), .y = 0, .height = 10, .width = widget_width };
-
-            _ = rgui.guiSlider(
-                top_right,
-                "slow " ++ std.fmt.comptimePrint("{}", .{comptime std.fmt.fmtDuration(@intFromFloat(@exp(-2.0) * std.time.ns_per_s))}),
-                "fast " ++ std.fmt.comptimePrint("{}", .{comptime std.fmt.fmtDuration(@intFromFloat(@exp(8.0) * std.time.ns_per_s))}),
-                &time_scale,
-                -2,
-                8,
-            );
-
             messages.draw();
 
             rl.endDrawing();
@@ -513,6 +553,7 @@ pub fn mainUi() !void {
 pub fn generateNiceRoute(
     alloc: std.mem.Allocator,
     train: Train,
+    number_of_nodes: usize,
     starting_seed: u64,
 ) !struct {
     route: Route,
@@ -523,7 +564,7 @@ pub fn generateNiceRoute(
     var random_impl = std.Random.DefaultPrng.init(0);
     var random = random_impl.random();
 
-    var route = try generateRandomRoute(alloc, random, 10);
+    var route = try generateRandomRoute(alloc, random, number_of_nodes);
 
     var seed: u64 = starting_seed;
     while (true) {

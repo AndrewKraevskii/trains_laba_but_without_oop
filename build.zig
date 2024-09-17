@@ -18,8 +18,8 @@ pub fn build(b: *std.Build) !void {
         const exe = rlz.emcc.compileForEmscripten(b, "train", "src/main.zig", target, optimize);
 
         exe.linkLibrary(raylib_artifact);
-        // exe.addre
         exe.root_module.addImport("raylib", raylib);
+        exe.root_module.addImport("raygui", raygui);
 
         const link_step = try rlz.emcc.linkWithEmscripten(b, &[_]*std.Build.Step.Compile{ exe, raylib_artifact });
 
