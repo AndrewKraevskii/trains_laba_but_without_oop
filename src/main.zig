@@ -9,255 +9,334 @@ const max_waypoints = 1000;
 
 const sleepers_density = 0.1;
 
-pub fn drawTrain(position: Vec, rotation: f32) void {
-    rl.drawRectanglePro(rectangleFromSizeAndPos(position, .{ .x = wagon_length, .y = wagon_width }), .{ .x = wagon_length / 2, .y = wagon_width / 2 }, -rotation * 180 / std.math.pi, .white);
-}
+const Segment = union(enum) {
+    common: Common,
+    force: Force,
+    station: Station,
 
-pub fn getTrainInfo(points: []const Vec, t: f32) ?struct {
-    section_index: usize,
-    position: rl.Vector2,
-    direction: rl.Vector2,
-} {
-    std.debug.assert(0 <= t and t <= 1);
-    if (points.len < 2) return null;
-
-    const total_distance = distance: {
-        var total_distance: f32 = 0;
-        for (points[0 .. points.len - 1], points[1..points.len]) |from, to| {
-            total_distance += from.distance(to);
-        }
-        break :distance total_distance;
+    const Common = struct {
+        length: f32, // meters
     };
-    var distance: f32 = 0;
 
-    const segment_index, const segment_t = segment_t: for (points[0 .. points.len - 1], points[1..points.len], 0..) |from, to, index| {
-        const new_distance = distance + from.distance(to);
-        if (distance <= t * total_distance and new_distance >= t * total_distance) {
-            break :segment_t .{ index, (t * total_distance - distance) / (new_distance - distance) };
-        }
-        distance = new_distance;
-    } else return null;
-
-    std.log.debug("index: {d}", .{segment_index});
-    const position =
-        rl.getSplinePointCatmullRom(
-        points[segment_index -| 1],
-        points[segment_index],
-        points[segment_index + 1],
-        points[@min(segment_index + 2, points.len - 1)],
-        segment_t,
-    );
-    const prev_pos =
-        rl.getSplinePointCatmullRom(
-        points[segment_index -| 1],
-        points[segment_index],
-        points[segment_index + 1],
-        points[@min(segment_index + 2, points.len - 1)],
-        @max(segment_t - 0.1, 0),
-    );
-    const next_pos =
-        rl.getSplinePointCatmullRom(
-        points[segment_index -| 1],
-        points[segment_index],
-        points[segment_index + 1],
-        points[@min(segment_index + 2, points.len - 1)],
-        @min(segment_t + 0.1, 1),
-    );
-
-    return .{
-        .section_index = segment_index,
-        .position = position,
-        .direction = next_pos.subtract(prev_pos).normalize(),
+    const Force = struct {
+        length: f32, // meters
+        applied_force: f32, // positive is acceleration
     };
-}
 
-pub fn rectangleFromSizeAndPos(position: Vec, size: Vec) rl.Rectangle {
-    return .{
-        .x = position.x,
-        .y = position.y,
-        .width = size.x,
-        .height = size.y,
+    const Station = struct {
+        max_arriving_speed: f32,
     };
-}
 
-const Rails = union(enum) {
-    common,
-    force: f32,
-    // station, // Пока хз чё это
+    pub fn length(self: @This()) f32 {
+        return switch (self) {
+            .common => |seg| seg.length,
+            .force => |seg| seg.length,
+            .station => 0,
+        };
+    }
+};
 
-    pub fn theme(rail: Rails) struct {
-        colors: []const rl.Color,
-        widths: []f32,
-    } {
-        switch (rail) {
-            .common, .force => .{ .widths = &.{ rails_width, rails_width - 5 }, .colors = &.{ .brown, .black } },
-        }
-        return;
+const Route = struct {
+    segments: std.ArrayList(Segment),
+    route_end_speed_limit: f32,
+
+    pub fn length(self: @This()) f32 {
+        var sum: f32 = 0;
+        for (self.segments.items) |segment|
+            sum += segment.length();
+        return sum;
     }
 };
 
 const Train = struct {
-    position: f32,
-    speed: f32,
+    position: f32 = 0.0, // meters
+    speed: f32 = 0.0, // meters/second
     max_force: f32,
     mass: f32,
-
-    pub fn move(self: *Train, rails: Rails, time: f32) enum {
-        moving,
-        broke,
-    } {
-        switch (rails) {
-            .common => self.position = self.speed * time,
-
-            .force => |f| {
-                if (@abs(f) > @abs(self.max_force)) {
-                    return .broke;
-                }
-                const delta_speed = (f / self.mass) * time;
-                const half_delta_speed = delta_speed / 2;
-
-                self.speed += half_delta_speed;
-                self.position = self.speed * time;
-                self.speed += half_delta_speed;
-            },
-            // .station => {
-            //     @panic("Not implemented");
-            // },
-        }
-
-        return .moving;
-    }
 };
 
-const Railroad = struct {
-    positions: std.ArrayList(Vec),
-    type: std.ArrayList(Rails),
-    length: f32 = 1000,
+pub fn drawRoute(route: Route, rect: rl.Rectangle) void {
+    const top_left = rl.Vector2.init(rect.x, rect.y);
+    const length = route.length();
+    const scale = rect.width / length;
+    const segments = route.segments.items;
 
-    pub fn init(alloc: std.mem.Allocator) Railroad {
-        return .{
-            .positions = .init(alloc),
-            .type = .init(alloc),
+    const padding = 10;
+
+    {
+        var current_offset_x: f32 = 0;
+        for (segments) |segment| {
+            const next_offset_x = current_offset_x + segment.length();
+            defer current_offset_x = next_offset_x;
+            switch (segment) {
+                .common, .force => {
+                    const color: rl.Color = if (segment == .common) .white else .red;
+                    const start = top_left.add(.{ .x = scale * current_offset_x, .y = 0 });
+                    rl.drawLineEx(
+                        start.add(.{ .x = padding, .y = 0 }),
+                        start.add(.{ .x = scale * segment.length() - padding, .y = 0 }),
+                        5,
+                        color,
+                    );
+                },
+                .station => {
+                    rl.drawCircleV(
+                        top_left.add(.{ .x = scale * current_offset_x, .y = 0 }),
+                        padding,
+                        .blue,
+                    );
+                },
+            }
+        }
+    }
+
+    {
+        var current_offset_x: f32 = 0;
+        for (segments[0 .. segments.len - 1], 0..) |segment, index| {
+            const next_offset_x = current_offset_x + segment.length();
+            defer current_offset_x = next_offset_x;
+            if (segments[index] != .station and segments[index + 1] != .station) {
+                rl.drawCircleLinesV(
+                    top_left.add(.{ .x = scale * next_offset_x, .y = 0 }),
+                    padding,
+                    .white,
+                );
+            }
+        }
+    }
+}
+
+pub fn getTrainSegment(train: Train, route: Route) ?struct {
+    segment: Segment,
+    index: usize,
+    position: f32,
+} {
+    const segments = route.segments.items;
+    var current_offset_x: f32 = 0;
+    for (segments, 0..) |segment, index| {
+        const next_offset_x = current_offset_x + segment.length();
+        defer current_offset_x = next_offset_x;
+        if (current_offset_x <= train.position and train.position < next_offset_x) return .{
+            .segment = segment,
+            .index = index,
+            .position = train.position - current_offset_x,
         };
     }
+    return null;
+}
 
-    pub fn drawRails(railroad: Railroad, colors: struct { rail: rl.Color, sleeper: rl.Color }) void {
-        const pos = railroad.positions.items;
-        if (railroad.type.items.len < 4) return;
-        const theme = railroad.type.items[0];
-        _ = theme; // autofix
-        for (0..railroad.positions.items.len - 4) |i| {
-            _ = i; // autofix
-            inline for (.{ rails_width, rails_width - 5 }, .{ colors.rail, rl.Color.black }) |thickness, color| {
-                rl.drawSplineCatmullRom(pos, thickness, color);
-                if (pos.len >= 3) {
-                    {
-                        const points = pos[0..1] ++ pos[0..3];
-                        rl.drawSplineCatmullRom(points, thickness, color);
-                    }
-                    {
-                        const points = pos[pos.len - 3 ..][0..3] ++ pos[pos.len - 1 ..][0..1];
-                        rl.drawSplineCatmullRom(points, thickness, color);
-                    }
-                }
+pub fn moveTrain(
+    train: Train,
+    route: Route,
+    delta_t: f32,
+) error{
+    ExceesiveSpeedAtTheStation,
+    ExcessiveSpeedAtRouteEnd,
+    SpeedIsNegative,
+    TrainBrokenFromToMuchForce,
+    SegmentNotFound,
+    ZeroSpeedOnCommonRails,
+    FinishedRouteSuccesfully,
+}!Train {
+    var mutable_train = train;
+    const current_segment = getTrainSegment(mutable_train, route) orelse return error.SegmentNotFound;
+    if (train.speed <= 0 and current_segment.segment == .common) {
+        return error.ZeroSpeedOnCommonRails;
+    }
+
+    var train_delta_pos: f32 = 0;
+    switch (current_segment.segment) {
+        .common => {
+            train_delta_pos += delta_t * mutable_train.speed;
+        },
+        .force => |force| {
+            if (mutable_train.max_force < force.applied_force) {
+                return error.TrainBrokenFromToMuchForce;
+            }
+
+            train_delta_pos += delta_t * mutable_train.speed / 2;
+            mutable_train.speed += force.applied_force / mutable_train.mass;
+            train_delta_pos += delta_t * mutable_train.speed / 2;
+        },
+        .station => {
+            // empty
+        },
+    }
+    mutable_train.position += train_delta_pos;
+
+    if (mutable_train.speed < 0) {
+        return error.SpeedIsNegative;
+    }
+
+    if ((train_delta_pos + current_segment.position) > current_segment.segment.length()) {
+        // train moved to next segment
+        if (current_segment.index + 1 == route.segments.items.len) {
+            // route finished
+            if (mutable_train.speed > route.route_end_speed_limit)
+                return error.ExcessiveSpeedAtRouteEnd;
+
+            return error.FinishedRouteSuccesfully;
+        } else {
+            const next_segment = route.segments.items[current_segment.index + 1];
+            if (next_segment == .station and train.speed > next_segment.station.max_arriving_speed) {
+                return error.ExceesiveSpeedAtTheStation;
             }
         }
-        if (pos.len >= 4) {
-            var maybe_prev_sleeper_pos: ?Vec = null;
-            for (0..pos.len - 1) |i| {
-                const start_pos =
-                    rl.getSplinePointCatmullRom(
-                    pos[i -| 1],
-                    pos[i],
-                    pos[i + 1],
-                    pos[@min(i + 2, pos.len - 1)],
-                    0,
-                );
+    }
 
-                const end_pos =
-                    rl.getSplinePointCatmullRom(
-                    pos[i -| 1],
-                    pos[i],
-                    pos[i + 1],
-                    pos[@min(i + 2, pos.len - 1)],
-                    1,
-                );
+    return mutable_train;
+}
 
-                const distance = end_pos.distance(start_pos);
-                const times = distance * sleepers_density;
+pub fn generateRandomRoute(alloc: std.mem.Allocator, random: std.Random, number_of_segments: usize) !Route {
+    var route = Route{ .segments = .init(alloc), .route_end_speed_limit = random.float(f32) * 10 + 10 };
+    errdefer route.segments.deinit();
 
-                for (0..@intFromFloat(times)) |t| {
-                    const sleeper_pos =
-                        rl.getSplinePointCatmullRom(
-                        pos[i -| 1],
-                        pos[i],
-                        pos[i + 1],
-                        pos[@min(i + 2, pos.len - 1)],
-                        @as(f32, @floatFromInt(t)) / times,
-                    );
-                    defer maybe_prev_sleeper_pos = sleeper_pos;
-                    const prev_sleeper_pos = maybe_prev_sleeper_pos orelse continue;
+    var prev: ?std.meta.Tag(Segment) = null;
+    for (0..number_of_segments) |index| {
+        var segment_type = random.enumValue(std.meta.Tag(Segment));
+        defer prev = segment_type;
+        while (.station == segment_type and (prev == null or .station == prev.? or index + 1 == number_of_segments)) {
+            segment_type = random.enumValue(std.meta.Tag(Segment));
+        }
 
-                    const perpendicular = prev_sleeper_pos.subtract(sleeper_pos).normalize().rotate(std.math.tau / 4.0).scale(rails_width / 2.0);
-                    rl.drawLineV(prev_sleeper_pos.add(perpendicular), prev_sleeper_pos.subtract(perpendicular), colors.sleeper);
-                }
+        const segment: Segment = switch (segment_type) {
+            .common => .{ .common = .{ .length = random.float(f32) * 10 + 10 } },
+            .station => .{ .station = .{ .max_arriving_speed = random.float(f32) * 10 + 10 } },
+            .force => .{ .force = .{
+                .length = random.float(f32) * 10 + 10,
+                .applied_force = random.float(f32) * 20 - 5,
+            } },
+        };
+        try route.segments.append(segment);
+    }
+
+    return route;
+}
+
+const ErrorMessages = struct {
+    position: Vec,
+    messages: std.BoundedArray(Message, 50),
+    font_size: i32,
+
+    const Message = struct {
+        string: [:0]const u8,
+        color: rl.Color = .red,
+        current_position: f32 = 0,
+        time_to_leave: f32 = 10,
+    };
+
+    pub fn addMessage(self: *ErrorMessages, message: Message) void {
+        if (self.messages.capacity() == self.messages.len) {
+            _ = self.messages.orderedRemove(0);
+        }
+
+        self.messages.appendAssumeCapacity(message);
+    }
+
+    pub fn update(self: *@This(), delta_time: f32) void {
+        var index: usize = 0;
+        while (index < self.messages.len) {
+            var message = self.messages.get(index);
+            message.time_to_leave -= delta_time;
+            if (message.time_to_leave <= 0) {
+                _ = self.messages.orderedRemove(index);
+                continue;
             }
+            const correct_positon = @as(f32, @floatFromInt(index)) *
+                @as(f32, @floatFromInt(self.font_size));
+            message.current_position = expDecay(message.current_position, correct_positon, 3, delta_time);
+
+            self.messages.set(index, message);
+
+            index += 1;
+        }
+    }
+
+    pub fn draw(self: @This()) void {
+        for (self.messages.slice()) |message| {
+            rl.drawText(
+                message.string,
+                @intFromFloat(self.position.x),
+                @intFromFloat(self.position.y + message.current_position),
+                self.font_size,
+                message.color,
+            );
         }
     }
 };
 
+fn expDecay(a: anytype, b: @TypeOf(a), lambda: @TypeOf(a), dt: @TypeOf(a)) @TypeOf(a) {
+    return std.math.lerp(a, b, 1 - @exp(-lambda * dt));
+}
+
 pub fn main() !void {
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var buf: [100000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const alloc = fba.allocator();
 
-    var cursor_force_value: f32 = 0;
+    const width = 1000;
+    const height = 1000;
+    var random_impl = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
+    const random = random_impl.random();
 
-    rl.initWindow(1000, 1000, "it's training time");
+    var train = Train{ .mass = 1000, .max_force = 1000 };
+    var route = try generateRandomRoute(alloc, random, 10);
 
-    var railroad: Railroad = .init(alloc);
-
-    var train = Train{
-        .position = 0,
-        .speed = 0,
-        .max_force = 100,
-        .mass = 100,
+    var messages = ErrorMessages{
+        .position = .zero(),
+        .messages = .{},
+        .font_size = 30,
     };
 
+    std.log.debug("{any}", .{route});
+    rl.initWindow(width, height, "it's training time");
+
     while (!rl.windowShouldClose()) {
-        rl.beginDrawing();
-
-        cursor_force_value += rl.getMouseWheelMove();
-
-        rl.clearBackground(rl.Color.black);
-        if (rl.isMouseButtonPressed(.mouse_button_left) or rl.isMouseButtonPressed(.mouse_button_right)) {
-            try railroad.positions.append(rl.getMousePosition());
-            if (railroad.positions.items.len != 1) {
-                try railroad.type.append(if (rl.isMouseButtonPressed(.mouse_button_left)) .common else .{ .force = cursor_force_value });
+        {
+            if (rl.isMouseButtonPressed(.mouse_button_left)) {
+                route.segments.deinit();
+                route = try generateRandomRoute(alloc, random, 10);
+                train.position = 0;
+                train.speed = 0;
             }
+
+            if (moveTrain(train, route, rl.getFrameTime())) |new_train| {
+                train = new_train;
+            } else |err| {
+                const color: rl.Color = switch (err) {
+                    error.FinishedRouteSuccesfully => .green,
+                    else => .red,
+                };
+                messages.addMessage(.{
+                    .string = @errorName(err),
+                    .color = color,
+                });
+                train = Train{ .mass = 1000, .max_force = 1000 };
+                route.segments.deinit();
+                route = try generateRandomRoute(alloc, random, 10);
+            }
+
+            messages.update(rl.getFrameTime());
         }
 
-        railroad.drawRails(.{
-            .rail = .brown,
-            .sleeper = .gray,
-        });
+        {
+            rl.beginDrawing();
+            rl.clearBackground(rl.Color.black);
 
-        if (getTrainInfo(railroad.positions.items, train.position / railroad.length)) |info| {
-            if (train.move(railroad.type.items[info.section_index], rl.getFrameTime()) == .broke) return;
+            const scale = width / route.length();
+            drawRoute(route, .{ .x = 0, .y = height / 2.0, .width = width, .height = height });
+            { // draw train
+                rl.drawRectanglePro(.{
+                    .x = train.position * scale,
+                    .y = height / 2.0,
+                    .width = 10,
+                    .height = 10,
+                }, .{ .x = 5, .y = 5 }, 0, .white);
+            }
+            messages.draw();
 
-            std.log.debug("angle: {d}", .{info.direction.angle(.init(0, 1))});
-            drawTrain(info.position, info.direction.angle(.init(1, 0)));
-            std.log.debug("Position is {any}", .{info.position});
-            const text = try std.fmt.allocPrintZ(alloc, "curent force value: {any}", .{cursor_force_value});
-            defer alloc.free(text);
-            rl.drawText(text, 40, 40, 20, .white);
-        } else {
-            std.log.debug("Position not found", .{});
+            rl.endDrawing();
         }
-        rl.drawFPS(10, 10);
-
-        rl.endDrawing();
     }
 
     rl.closeWindow();
