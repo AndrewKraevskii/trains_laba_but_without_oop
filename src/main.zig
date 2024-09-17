@@ -1,8 +1,9 @@
 const std = @import("std");
 const rl = @import("raylib");
+const rgui = @import("raygui");
 
 const Vec = rl.Vector2;
-
+const station_width = 10;
 // All unites are in [SI](https://en.wikipedia.org/wiki/International_System_of_Units).
 
 const Segment = union(enum) {
@@ -51,35 +52,49 @@ const Train = struct {
     mass: f32,
 };
 
-pub fn drawRoute(route: Route, rect: rl.Rectangle) void {
-    const top_left = rl.Vector2.init(rect.x, rect.y);
+pub fn drawRoute(route: Route, rect: rl.Rectangle, highlighting: ?struct { index: usize, type: enum { hovered, selected } }) void {
+    const highlighting_color: ?rl.Color = if (highlighting) |h| if (h.type == .hovered) .white else .yellow else null;
+    const middle_left = rl.Vector2.init(rect.x, rect.y + rect.height / 2);
     const length = route.length();
     const scale = rect.width / length;
     const segments = route.segments.items;
 
-    const padding = 10;
+    const padding = station_width;
 
     {
         var current_offset_x: f32 = 0;
-        for (segments) |segment| {
+        for (segments, 0..) |segment, index| {
+            const is_selected = highlighting != null and highlighting.?.index == index;
+
             const next_offset_x = current_offset_x + segment.length();
             defer current_offset_x = next_offset_x;
             switch (segment) {
                 .common, .force => {
-                    const color: rl.Color = if (segment == .common) .white else .red;
-                    const start = top_left.add(.{ .x = scale * current_offset_x, .y = 0 });
+                    const start = middle_left.add(.{ .x = scale * current_offset_x, .y = 0 });
+
+                    if (is_selected) {
+                        if (highlighting_color) |color| {
+                            rl.drawLineEx(
+                                start.add(.{ .x = padding, .y = 0 }),
+                                start.add(.{ .x = scale * segment.length() - padding, .y = 0 }),
+                                9,
+                                color,
+                            );
+                        }
+                    }
                     rl.drawLineEx(
                         start.add(.{ .x = padding, .y = 0 }),
                         start.add(.{ .x = scale * segment.length() - padding, .y = 0 }),
                         5,
-                        color,
+                        if (segment == .common) .white else .red,
                     );
                 },
                 .station => {
+                    const color: rl.Color = if (is_selected) .yellow else .blue;
                     rl.drawCircleV(
-                        top_left.add(.{ .x = scale * current_offset_x, .y = 0 }),
+                        middle_left.add(.{ .x = scale * current_offset_x, .y = 0 }),
                         padding,
-                        .blue,
+                        color,
                     );
                 },
             }
@@ -93,7 +108,7 @@ pub fn drawRoute(route: Route, rect: rl.Rectangle) void {
             defer current_offset_x = next_offset_x;
             if (segments[index] != .station and segments[index + 1] != .station) {
                 rl.drawCircleLinesV(
-                    top_left.add(.{ .x = scale * next_offset_x, .y = 0 }),
+                    middle_left.add(.{ .x = scale * next_offset_x, .y = 0 }),
                     padding,
                     .white,
                 );
@@ -121,6 +136,27 @@ pub fn getTrainSegment(train: Train, route: Route) ?struct {
     }
     return null;
 }
+
+pub fn getRouteSegmentIndexByPosition(
+    route: Route,
+    fraction_of_route: f32,
+    stations_padding: f32,
+) ?usize {
+    std.debug.assert(0 <= fraction_of_route and fraction_of_route <= 1);
+    const total_route_length = route.length();
+    const scaled_padding = stations_padding;
+
+    const segments = route.segments.items;
+    var current_offset_x: f32 = 0;
+    for (segments, 0..) |segment, index| {
+        const next_offset_x = current_offset_x + segment.length() / total_route_length;
+        defer current_offset_x = next_offset_x;
+        const padding = if (segment == .station) -scaled_padding else scaled_padding;
+        if (current_offset_x + padding <= fraction_of_route and fraction_of_route < next_offset_x - padding) return index;
+    }
+    return null;
+}
+
 const RouteCompiltionErrors = error{
     ExceesiveSpeedAtTheStation,
     ExcessiveSpeedAtRouteEnd,
@@ -130,6 +166,7 @@ const RouteCompiltionErrors = error{
 };
 
 const MoveTrainResult = error{FinishedRouteSuccesfully} || RouteCompiltionErrors;
+
 pub fn moveTrain(
     train: Train,
     route: Route,
@@ -279,7 +316,7 @@ fn expDecay(a: anytype, b: @TypeOf(a), lambda: @TypeOf(a), dt: @TypeOf(a)) @Type
 }
 
 pub fn mainUi() !void {
-    var buf: [1000]u8 = undefined;
+    var buf: [10000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const alloc = fba.allocator();
 
@@ -289,8 +326,9 @@ pub fn mainUi() !void {
     const default_train = Train{ .mass = 200 * 1000, .max_force = 1000 * 1000 };
 
     var train = default_train;
-    var result = try generateNiceRoute(alloc, train, 0);
+    const result = try generateNiceRoute(alloc, train, 0);
     var route = result.route;
+    defer route.segments.deinit();
     var seed = result.seed + 1;
 
     var messages = ErrorMessages{
@@ -299,24 +337,25 @@ pub fn mainUi() !void {
         .font_size = 30,
     };
 
-    std.log.debug("{any}", .{route});
     rl.initWindow(width, height, "it's training time");
     rl.setTargetFPS(60);
 
-    const time_scale = 600;
+    var is_paused: bool = false;
+    var maybe_selected_index: ?usize = null;
+
+    var time_scale: f32 = 1;
     const time_step = 1.0 / 60.0;
     var ui_time_step: f32 = 0;
+    const widget_width = 100;
+
+    var drop_down_edit_mode = false;
     while (!rl.windowShouldClose()) {
-        std.log.debug("{}", .{fba.end_index});
-        {
-            if (rl.isMouseButtonPressed(.mouse_button_left)) {
-                route.segments.deinit();
-                train = default_train;
-                result = try generateNiceRoute(alloc, train, seed);
-                seed = result.seed + 1;
-                route = result.route;
-            }
-            ui_time_step += rl.getFrameTime() * time_scale;
+        if (rl.isKeyPressed(.key_space)) {
+            is_paused = !is_paused;
+        }
+
+        if (!is_paused) {
+            ui_time_step += rl.getFrameTime() * @exp(time_scale);
             while (ui_time_step > time_step) : (ui_time_step -= time_step) {
                 if (moveTrain(train, route, 1.0 / 60.0)) |new_train| {
                     train = new_train;
@@ -329,6 +368,7 @@ pub fn mainUi() !void {
                         .string = @errorName(err),
                         .color = color,
                     });
+                    maybe_selected_index = null;
                     route.segments.deinit();
                     train = default_train;
                     const res = try generateNiceRoute(alloc, train, seed);
@@ -336,17 +376,112 @@ pub fn mainUi() !void {
                     route = res.route;
                 }
             }
-
-            messages.update(rl.getFrameTime());
         }
+        messages.update(rl.getFrameTime());
 
         {
             rl.beginDrawing();
             rl.clearBackground(rl.Color.black);
 
-            const scale = width / route.length();
-            drawRoute(route, .{ .x = 0, .y = height / 2.0, .width = width, .height = height });
+            const route_rect = rl.Rectangle{ .x = 0, .y = height / 2.0, .width = @floatFromInt(rl.getScreenWidth()), .height = 30 };
+            const maybe_hovered_index = if (rl.checkCollisionPointRec(rl.getMousePosition(), route_rect)) selected_index: {
+                const mouse_x = rl.getMousePosition().x;
+                const fraction = (mouse_x - route_rect.x) / route_rect.width;
+                break :selected_index getRouteSegmentIndexByPosition(
+                    route,
+                    fraction,
+                    station_width / route_rect.width,
+                );
+            } else null;
+
+            const maybe_index = maybe_selected_index orelse maybe_hovered_index;
+
+            drawRoute(route, route_rect, if (maybe_index) |index| .{
+                .index = index,
+                .type = if (maybe_selected_index != null) .selected else .hovered,
+            } else null);
+
+            if (maybe_index) |selected_index| { // draw segment info
+                if (rl.isMouseButtonPressed(.mouse_button_left)) {
+                    if (maybe_hovered_index) |hovered_index|
+                        maybe_selected_index = hovered_index;
+                }
+                const segment: *Segment = &route.segments.items[selected_index];
+
+                var rect = rl.Rectangle{ .x = @floatFromInt(rl.getScreenWidth() - widget_width - 100), .y = 50, .height = 10, .width = widget_width };
+
+                var active: i32 = @intFromEnum(segment.*);
+
+                if (rgui.guiDropdownBox(
+                    rect,
+                    "common;force;station",
+                    &active,
+                    drop_down_edit_mode,
+                ) == 1) {
+                    drop_down_edit_mode = !drop_down_edit_mode;
+                }
+                if (active != @intFromEnum(segment.*)) {
+                    switch (@as(std.meta.Tag(Segment), @enumFromInt(active))) {
+                        .common => {
+                            segment.* = .{ .common = .{ .length = 10_000 } };
+                        },
+                        .force => {
+                            segment.* = .{ .force = .{ .length = 10_000, .applied_force = 100000 } };
+                        },
+                        .station => {
+                            segment.* = .{ .station = .{ .max_arriving_speed = 20 } };
+                        },
+                    }
+                }
+
+                rect.y += rect.height * 5;
+                switch (segment.*) {
+                    .common => {
+                        _ = rgui.guiSlider(
+                            rect,
+                            "length 0m",
+                            "10km",
+                            &segment.common.length,
+                            0,
+                            10000,
+                        );
+                        rect.y += rect.height;
+                    },
+                    .force => {
+                        _ = rgui.guiSlider(
+                            rect,
+                            "length 0m",
+                            "100km",
+                            &segment.force.length,
+                            0,
+                            100000,
+                        );
+                        rect.y += rect.height;
+                        _ = rgui.guiSlider(
+                            rect,
+                            "applied force 0N",
+                            "1MN",
+                            &segment.force.applied_force,
+                            -1000000,
+                            1000000,
+                        );
+                    },
+                    .station => {
+                        _ = rgui.guiSlider(
+                            rect,
+                            "max speed 0m/s",
+                            "100m/s",
+                            &segment.station.max_arriving_speed,
+                            0,
+                            100,
+                        );
+                        rect.y += rect.height;
+                    },
+                }
+            }
+
             { // draw train
+                const scale = width / route.length();
                 rl.drawRectanglePro(.{
                     .x = train.position * scale,
                     .y = height / 2.0,
@@ -354,6 +489,18 @@ pub fn mainUi() !void {
                     .height = 10,
                 }, .{ .x = 5, .y = 5 }, 0, .white);
             }
+
+            const top_right = rl.Rectangle{ .x = @floatFromInt(rl.getScreenWidth() - widget_width - 100), .y = 0, .height = 10, .width = widget_width };
+
+            _ = rgui.guiSlider(
+                top_right,
+                "slow " ++ std.fmt.comptimePrint("{}", .{comptime std.fmt.fmtDuration(@intFromFloat(@exp(-2.0) * std.time.ns_per_s))}),
+                "fast " ++ std.fmt.comptimePrint("{}", .{comptime std.fmt.fmtDuration(@intFromFloat(@exp(8.0) * std.time.ns_per_s))}),
+                &time_scale,
+                -2,
+                8,
+            );
+
             messages.draw();
 
             rl.endDrawing();
