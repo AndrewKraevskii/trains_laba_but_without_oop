@@ -124,7 +124,7 @@ pub fn getTrainSegment(train: Train, route: Route) ?struct {
     for (segments, 0..) |segment, index| {
         const next_offset_x = current_offset_x + segment.length();
         defer current_offset_x = next_offset_x;
-        if (current_offset_x <= train.position and train.position < next_offset_x) return .{
+        if (train.position < next_offset_x) return .{
             .segment = segment,
             .index = index,
             .position = train.position - current_offset_x,
