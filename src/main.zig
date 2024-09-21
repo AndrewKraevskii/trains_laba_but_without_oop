@@ -60,7 +60,7 @@ const Train = struct {
         ZeroSpeedOnCommonRails,
     };
 
-    const MoveResult = error{FinishedRouteSuccesfully} || RouteCompiltionErrors;
+    const MoveResult = error{FinishedRouteSuccessfully} || RouteCompiltionErrors;
 
     pub fn move(
         train: Train,
@@ -73,7 +73,7 @@ const Train = struct {
             return if (mutable_train.speed > route.route_end_speed_limit)
                 error.ExcessiveSpeedAtRouteEnd
             else
-                error.FinishedRouteSuccesfully;
+                error.FinishedRouteSuccessfully;
         };
         if (train.speed <= 0 and current_segment.segment == .common) {
             return error.ZeroSpeedOnCommonRails;
@@ -111,7 +111,7 @@ const Train = struct {
                 if (mutable_train.speed > route.route_end_speed_limit)
                     return error.ExcessiveSpeedAtRouteEnd;
 
-                return error.FinishedRouteSuccesfully;
+                return error.FinishedRouteSuccessfully;
             } else {
                 const next_segment = route.segments.items[current_segment.index + 1];
                 if (next_segment == .station and train.speed > next_segment.station.max_arriving_speed) {
@@ -302,9 +302,9 @@ const MessageDrawer = struct {
                 _ = self.messages.orderedRemove(index);
                 continue;
             }
-            const correct_positon = @as(f32, @floatFromInt(index)) *
+            const correct_position = @as(f32, @floatFromInt(index)) *
                 @as(f32, @floatFromInt(self.font_size));
-            message.current_position = expDecay(message.current_position, correct_positon, 3, delta_time);
+            message.current_position = expDecay(message.current_position, correct_position, 3, delta_time);
 
             self.messages.set(index, message);
 
@@ -381,7 +381,7 @@ pub fn tryRoute(
             train = new_train;
         } else |err| {
             switch (err) {
-                error.FinishedRouteSuccesfully => {
+                error.FinishedRouteSuccessfully => {
                     return .{ .time_to_finish_seconds = time_passed };
                 },
                 else => |other| {
@@ -439,7 +439,7 @@ pub fn runUi() !void {
                     train = new_train;
                 } else |err| {
                     const color: rl.Color = switch (err) {
-                        error.FinishedRouteSuccesfully => .green,
+                        error.FinishedRouteSuccessfully => .green,
                         else => .red,
                     };
                     messages.addMessage(.{
