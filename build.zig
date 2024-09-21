@@ -5,6 +5,11 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const benchmark = b.option(bool, "benchmark", "Run benchmark instead of graphic app") orelse false;
+
+    const options = b.addOptions();
+    options.addOption(bool, "benchmark", benchmark);
+
     const raylib_dep = b.dependency("raylib-zig", .{
         .target = target,
         .optimize = optimize,
@@ -40,6 +45,7 @@ pub fn build(b: *std.Build) !void {
     exe.linkLibrary(raylib_artifact);
     exe.root_module.addImport("raylib", raylib);
     exe.root_module.addImport("raygui", raygui);
+    exe.root_module.addOptions("config", options);
 
     b.installArtifact(exe);
 

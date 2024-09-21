@@ -52,13 +52,24 @@ const Train = struct {
     max_force: f32,
     mass: f32,
 
+    const RouteCompiltionErrors = error{
+        ExceesiveSpeedAtTheStation,
+        ExcessiveSpeedAtRouteEnd,
+        SpeedIsNegative,
+        TrainBrokenFromToMuchForce,
+        ZeroSpeedOnCommonRails,
+    };
+
+    const MoveResult = error{FinishedRouteSuccesfully} || RouteCompiltionErrors;
+
     pub fn move(
         train: Train,
         route: Route,
         delta_t: f32,
-    ) MoveTrainResult!Train {
+    ) MoveResult!Train {
         var mutable_train = train;
-        const current_segment = getTrainSegment(mutable_train, route) orelse {
+        const maybe_segment = getTrainSegment(mutable_train, route);
+        const current_segment = maybe_segment orelse {
             return if (mutable_train.speed > route.route_end_speed_limit)
                 error.ExcessiveSpeedAtRouteEnd
             else
@@ -228,16 +239,6 @@ pub fn getRouteSegmentIndexByPosition(
     return null;
 }
 
-const RouteCompiltionErrors = error{
-    ExceesiveSpeedAtTheStation,
-    ExcessiveSpeedAtRouteEnd,
-    SpeedIsNegative,
-    TrainBrokenFromToMuchForce,
-    ZeroSpeedOnCommonRails,
-};
-
-const MoveTrainResult = error{FinishedRouteSuccesfully} || RouteCompiltionErrors;
-
 pub fn generateRandomRoute(alloc: std.mem.Allocator, random: std.Random, number_of_segments: usize) !Route {
     var route = Route{ .segments = .init(alloc), .route_end_speed_limit = random.float(f32) * 10 + 30 };
     errdefer route.segments.deinit();
@@ -358,7 +359,7 @@ pub fn generateNiceRoute(
     }
 }
 
-const TryRouteError = RouteCompiltionErrors || error{Timeout};
+const TryRouteError = Train.RouteCompiltionErrors || error{Timeout};
 
 pub fn tryRoute(
     starting_train: Train,
@@ -388,7 +389,8 @@ pub fn tryRoute(
         }
     }
 }
-pub fn main() !void {
+
+pub fn runUi() !void {
     var buf: [10000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const alloc = fba.allocator();
@@ -611,4 +613,24 @@ pub fn main() !void {
     }
 
     rl.closeWindow();
+}
+
+pub fn main() !void {
+    if (@import("config").benchmark) {
+        try benchmark();
+    } else {
+        try runUi();
+    }
+}
+
+pub fn benchmark() !void {
+    var buffer: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    var seed: u64 = 0;
+    const train = Train{ .max_force = 1000_000, .mass = 600000 };
+    for (0..100) |_| {
+        const res = try generateNiceRoute(fba.allocator(), train, 10, seed);
+        seed = res.seed + 1;
+        fba.reset();
+    }
 }
