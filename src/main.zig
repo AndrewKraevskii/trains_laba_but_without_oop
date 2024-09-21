@@ -243,8 +243,10 @@ pub fn generateRandomRoute(alloc: std.mem.Allocator, random: std.Random, number_
     var route = Route{ .segments = .init(alloc), .route_end_speed_limit = random.float(f32) * 10 + 30 };
     errdefer route.segments.deinit();
 
+    try route.segments.ensureTotalCapacityPrecise(number_of_segments);
+
     var prev: std.meta.Tag(Segment) = .force;
-    try route.segments.append(.{ .force = .{
+    route.segments.appendAssumeCapacity(.{ .force = .{
         .length = random.float(f32) * 4000 + 1000,
         .applied_force = random.float(f32) * 800000 - 300000,
     } });
@@ -265,7 +267,7 @@ pub fn generateRandomRoute(alloc: std.mem.Allocator, random: std.Random, number_
                 .applied_force = random.float(f32) * 800000 - 300000,
             } },
         };
-        try route.segments.append(segment);
+        route.segments.appendAssumeCapacity(segment);
     }
 
     return route;
